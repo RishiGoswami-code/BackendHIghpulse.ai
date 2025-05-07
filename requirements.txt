@@ -1,1 +1,13 @@
+# Core dependencies
+Flask==2.3.2
+Flask-Cors==3.0.10
+python-dotenv==1.0.0
+gunicorn==20.1.0
 
+
+# Authentication (if needed)
+PyJWT==2.7.0
+bcrypt==4.0.1
+
+# API (if needed)
+flask-restx==1.1.0
