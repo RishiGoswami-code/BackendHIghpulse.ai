@@ -379,11 +379,11 @@ def chat():
         # Generate context-aware response
         prompt = f"""You are a social media analysis assistant helping a user understand data about '{data.get('context', 'the topic')}'.
         
-Platform Analysis Status:
-{'\n'.join(platform_data)}
-
-Chat History:
-"""
+                Platform Analysis Status:
+                {'\n'.join(platform_data)}
+                
+                Chat History:
+                """
         
         for msg in data['chat_history']:
             prompt += f"{msg['role']}: {msg['content']}\n"
