@@ -15,6 +15,9 @@ import json
 from pathlib import Path
 import csv
 import hashlib
+import pytrends
+from pytrends.request import TrendReq
+import pandas as pd
 
 load_dotenv()
 
@@ -49,6 +52,9 @@ try:
 except Exception as e:
     print(f"Twitter API initialization failed: {str(e)}")
     twitter_api = None
+
+# Google Trends
+pytrends = TrendReq(hl='en-US', tz=360)
 
 WIKIPEDIA_LANG = 'en'
 wikipedia.set_lang(WIKIPEDIA_LANG)
@@ -261,6 +267,37 @@ def scrape_wikipedia(query):
         print(f"Wikipedia scrape error: {str(e)}")
         return None
 
+def get_google_trends(query, timeframe='today 12-m'):
+    """Get Google Trends data for the query"""
+    try:
+        pytrends.build_payload([query], timeframe=timeframe)
+        interest_over_time_df = pytrends.interest_over_time()
+        
+        if not interest_over_time_df.empty:
+            # Convert to list of {date: value} objects
+            trends_data = []
+            for date, row in interest_over_time_df.iterrows():
+                if date and not pd.isna(row[query]):
+                    trends_data.append({
+                        'date': date.strftime('%Y-%m-%d'),
+                        'value': int(row[query])
+                    })
+            
+            # Get related queries
+            related_queries = pytrends.related_queries()
+            top_related = related_queries[query]['top'].head(5).to_dict('records') if related_queries[query]['top'] is not None else []
+            rising_related = related_queries[query]['rising'].head(5).to_dict('records') if related_queries[query]['rising'] is not None else []
+            
+            return {
+                'trends': trends_data,
+                'top_related': top_related,
+                'rising_related': rising_related
+            }
+        return None
+    except Exception as e:
+        print(f"Google Trends error: {str(e)}")
+        return None
+
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
     if not request.is_json:
@@ -417,7 +454,19 @@ def analyze():
                 print(f"{platform_name} scrape failed: {str(e)}")
                 platform_status[platform_name] = "failed"
 
-        if not scraped_data:
+        # Get Google Trends data
+        google_trends = None
+        try:
+            google_trends = get_google_trends(query)
+            if google_trends:
+                platform_status['google_trends'] = "success"
+            else:
+                platform_status['google_trends'] = "failed"
+        except Exception as e:
+            print(f"Google Trends failed: {str(e)}")
+            platform_status['google_trends'] = "failed"
+
+        if not scraped_data and not google_trends:
             return jsonify({
                 "error": "No data could be collected from any platform",
                 "platform_status": platform_status
@@ -443,8 +492,13 @@ def analyze():
                 'sentiment_analysis': analyze_with_gemini(
                     f"Perform detailed sentiment analysis on content about '{query}'. Provide percentages for positive, neutral, and negative sentiment. Include a breakdown by platform if possible.",
                     scraped_data
+                ),
+                'trend_analysis': analyze_with_gemini(
+                    f"Identify emerging trends related to '{query}' based on the data. Highlight any patterns or changes over time.",
+                    scraped_data
                 )
             },
+            'google_trends': google_trends,
             'source_count': len(scraped_data),
             'timestamp': datetime.now().isoformat()
         }
