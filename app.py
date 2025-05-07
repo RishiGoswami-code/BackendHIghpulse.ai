@@ -28,7 +28,7 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["*"],
+        "origins": ["https://highpulse-ai-vga3.onrender.com"],
         "methods": ["POST", "OPTIONS"],
         "allow_headers": ["Content-Type"]
     }
