@@ -15,9 +15,11 @@ import json
 from pathlib import Path
 import csv
 import hashlib
-import pytrends
 from pytrends.request import TrendReq
 import pandas as pd
+from urllib.parse import urlparse
+import trafilatura  # For web page content extraction
+import time
 
 load_dotenv()
 
@@ -28,7 +30,7 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["https://highpulse-ai-vga3.onrender.com"],
+        "origins": ["*"],
         "methods": ["POST", "OPTIONS"],
         "allow_headers": ["Content-Type"]
     }
@@ -54,7 +56,11 @@ except Exception as e:
     twitter_api = None
 
 # Google Trends
-pytrends = TrendReq(hl='en-US', tz=360)
+try:
+    pytrends = TrendReq(hl='en-US', tz=360, timeout=(10,25), retries=2, backoff_factor=0.1)
+except Exception as e:
+    print(f"Google Trends initialization failed: {str(e)}")
+    pytrends = None
 
 WIKIPEDIA_LANG = 'en'
 wikipedia.set_lang(WIKIPEDIA_LANG)
@@ -206,21 +212,40 @@ def scrape_twitter(query, max_tweets=5):
         
     try:
         tweets = []
-        for tweet in tweepy.Cursor(twitter_api.search_tweets,
-                                 q=query,
-                                 tweet_mode='extended',
-                                 result_type='recent',
-                                 lang='en').items(max_tweets):
-            tweets.append({
-                'text': tweet.full_text,
-                'user': tweet.user.screen_name,
-                'retweets': tweet.retweet_count,
-                'likes': tweet.favorite_count,
-                'date': tweet.created_at.strftime('%Y-%m-%d'),
-                'url': f"https://twitter.com/{tweet.user.screen_name}/status/{tweet.id}",
-                'platform': 'twitter'
-            })
-        return tweets
+        # Using search_30_day if available, otherwise standard search
+        try:
+            # Premium API (30-day search)
+            for tweet in tweepy.Cursor(twitter_api.search_30_day,
+                                     label='socialmedia',
+                                     query=query,
+                                     maxResults=100).items(max_tweets):
+                tweets.append({
+                    'text': tweet.text,
+                    'user': tweet.user.screen_name,
+                    'retweets': tweet.retweet_count,
+                    'likes': tweet.favorite_count,
+                    'date': tweet.created_at.strftime('%Y-%m-%d'),
+                    'url': f"https://twitter.com/{tweet.user.screen_name}/status/{tweet.id}",
+                    'platform': 'twitter'
+                })
+        except:
+            # Standard API (fallback)
+            for tweet in tweepy.Cursor(twitter_api.search_tweets,
+                                     q=query,
+                                     tweet_mode='extended',
+                                     result_type='recent',
+                                     lang='en').items(max_tweets):
+                tweets.append({
+                    'text': tweet.full_text,
+                    'user': tweet.user.screen_name,
+                    'retweets': tweet.retweet_count,
+                    'likes': tweet.favorite_count,
+                    'date': tweet.created_at.strftime('%Y-%m-%d'),
+                    'url': f"https://twitter.com/{tweet.user.screen_name}/status/{tweet.id}",
+                    'platform': 'twitter'
+                })
+        
+        return tweets if tweets else None
     except Exception as e:
         print(f"Twitter scrape error: {str(e)}")
         return None
@@ -228,24 +253,38 @@ def scrape_twitter(query, max_tweets=5):
 def scrape_quora(query, max_questions=3):
     try:
         url = f"https://www.quora.com/search?q={requests.utils.quote(query)}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=15)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+        
+        # First get the session cookies
+        session = requests.Session()
+        session.get("https://www.quora.com", headers=headers)
+        
+        # Then make the search request
+        response = session.get(url, headers=headers, timeout=15)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
         questions = []
         
-        for item in soup.select('.q-box.qu-borderBottom')[:max_questions]:
-            title_elem = item.select_one('.q-text.qu-dynamicFontSize--large')
+        # Updated selector for Quora's current layout
+        for item in soup.select('.q-box[style*="padding-bottom: 16px"]')[:max_questions]:
+            title_elem = item.select_one('.q-text.qu-fontSize--large')
             if not title_elem:
+                continue
+                
+            url_elem = item.find('a', href=True)
+            if not url_elem:
                 continue
                 
             questions.append({
                 'title': title_elem.get_text(strip=True),
-                'url': "https://www.quora.com" + item.find('a')['href'],
+                'url': "https://www.quora.com" + url_elem['href'],
                 'platform': 'quora'
             })
-        return questions
+        return questions if questions else None
     except Exception as e:
         print(f"Quora scrape error: {str(e)}")
         return None
@@ -269,8 +308,20 @@ def scrape_wikipedia(query):
 
 def get_google_trends(query, timeframe='today 12-m'):
     """Get Google Trends data for the query"""
+    if not pytrends:
+        return None
+        
     try:
-        pytrends.build_payload([query], timeframe=timeframe)
+        # Build payload with retry
+        for attempt in range(3):
+            try:
+                pytrends.build_payload([query], timeframe=timeframe)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
+        
         interest_over_time_df = pytrends.interest_over_time()
         
         if not interest_over_time_df.empty:
@@ -296,6 +347,59 @@ def get_google_trends(query, timeframe='today 12-m'):
         return None
     except Exception as e:
         print(f"Google Trends error: {str(e)}")
+        return None
+
+def scrape_web_pages(query, num_pages=2):
+    """Scrape top web pages from Google search results"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+        
+        # Get Google search results
+        search_url = f"https://www.google.com/search?q={requests.utils.quote(query)}&num={num_pages+2}"
+        response = requests.get(search_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        links = []
+        
+        # Extract organic search results (skip ads)
+        for result in soup.select('div.g'):
+            link = result.find('a', href=True)
+            if link and 'http' in link['href']:
+                # Clean Google's tracking URL
+                parsed_url = urlparse(link['href'])
+                if parsed_url.query:
+                    query_params = dict(p.split('=') for p in parsed_url.query.split('&') if '=' in p)
+                    if 'url' in query_params:
+                        clean_url = query_params['url']
+                        links.append(clean_url)
+                else:
+                    links.append(link['href'])
+        
+        # Scrape content from top pages
+        pages = []
+        for url in links[:num_pages]:
+            try:
+                # Use trafilatura for clean content extraction
+                downloaded = trafilatura.fetch_url(url)
+                if downloaded:
+                    content = trafilatura.extract(downloaded, include_links=False)
+                    if content:
+                        pages.append({
+                            'url': url,
+                            'content': content[:2000] + '...' if len(content) > 2000 else content,
+                            'platform': 'web'
+                        })
+            except Exception as e:
+                print(f"Error scraping {url}: {str(e)}")
+                continue
+        
+        return pages if pages else None
+    except Exception as e:
+        print(f"Web page scraping error: {str(e)}")
         return None
 
 @app.route('/api/auth/login', methods=['POST'])
@@ -379,11 +483,11 @@ def chat():
         # Generate context-aware response
         prompt = f"""You are a social media analysis assistant helping a user understand data about '{data.get('context', 'the topic')}'.
         
-                Platform Analysis Status:
-                {'\n'.join(platform_data)}
-                
-                Chat History:
-                """
+Platform Analysis Status:
+{'\n'.join(platform_data)}
+
+Chat History:
+"""
         
         for msg in data['chat_history']:
             prompt += f"{msg['role']}: {msg['content']}\n"
@@ -439,7 +543,8 @@ def analyze():
             ('youtube', scrape_youtube),
             ('twitter', scrape_twitter),
             ('quora', scrape_quora),
-            ('wikipedia', scrape_wikipedia)
+            ('wikipedia', scrape_wikipedia),
+            ('web', scrape_web_pages)
         ]
 
         for platform_name, scraper in platforms:
@@ -456,15 +561,18 @@ def analyze():
 
         # Get Google Trends data
         google_trends = None
-        try:
-            google_trends = get_google_trends(query)
-            if google_trends:
-                platform_status['google_trends'] = "success"
-            else:
+        if pytrends:
+            try:
+                google_trends = get_google_trends(query)
+                if google_trends:
+                    platform_status['google_trends'] = "success"
+                else:
+                    platform_status['google_trends'] = "failed"
+            except Exception as e:
+                print(f"Google Trends failed: {str(e)}")
                 platform_status['google_trends'] = "failed"
-        except Exception as e:
-            print(f"Google Trends failed: {str(e)}")
-            platform_status['google_trends'] = "failed"
+        else:
+            platform_status['google_trends'] = "disabled"
 
         if not scraped_data and not google_trends:
             return jsonify({
