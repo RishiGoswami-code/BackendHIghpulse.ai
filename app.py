@@ -603,10 +603,11 @@ If the user asks questions about specific claims, refer to the verified scraped 
                 print(f"LangChain Chat Chain execution failed: {str(e)}. Falling back to direct API.")
 
         # Fallback to direct Gemini generation
+        platform_status_str = '\n'.join(platform_data)
         prompt = f"""You are a social media analysis assistant helping a user understand data about '{data.get('context', 'the topic')}'.
         
 Platform Analysis Status:
-{'\n'.join(platform_data)}
+{platform_status_str}
 
 Use the context of the analyzed social feeds to provide highly accurate, grounded, and concise answers to the user's questions. 
 
